@@ -211,3 +211,6 @@ cookies.json
 # Service runtime data (downloaded media + auto-refreshed cookies)
 /data/
 /media/
+
+# Local staging deploy runbook (machine/secrets-specific; not for the repo)
+/DEPLOY_STAGING.md
