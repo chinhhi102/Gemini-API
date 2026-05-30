@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gemini Service · Accounts</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e6e9ef; --mut:#9aa3b2;
+          --ok:#3fb950; --err:#f85149; --accent:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0; }
+  main { max-width:920px; margin:0 auto; padding:24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:18px; margin-bottom:20px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  input, textarea, select { width:100%; padding:9px 10px; background:#0d0f14; color:var(--fg);
+          border:1px solid var(--line); border-radius:7px; font:inherit; }
+  textarea { resize:vertical; min-height:60px; }
+  button { padding:8px 14px; border-radius:7px; border:1px solid var(--line);
+           background:#222733; color:var(--fg); cursor:pointer; font:inherit; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--err); }
+  button:hover { filter:brightness(1.12); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { flex:1; min-width:160px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); font-size:13px;
+           vertical-align:middle; }
+  th { color:var(--mut); font-weight:600; }
+  .pill { padding:2px 8px; border-radius:20px; font-size:11px; border:1px solid var(--line); }
+  .s-ok { color:var(--ok); border-color:var(--ok); }
+  .s-error { color:var(--err); border-color:var(--err); }
+  .s-untested,.s-other { color:var(--mut); }
+  .mut { color:var(--mut); }
+  .actions button { padding:4px 9px; font-size:12px; margin-right:4px; }
+  #toast { position:fixed; bottom:20px; right:20px; background:var(--card);
+           border:1px solid var(--line); border-radius:8px; padding:12px 16px; max-width:380px;
+           display:none; }
+  pre { background:#0d0f14; border:1px solid var(--line); border-radius:7px; padding:12px;
+        overflow:auto; white-space:pre-wrap; word-break:break-word; }
+  .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔹 Gemini Service</h1>
+  <div style="flex:1"></div>
+  <div style="min-width:260px">
+    <input id="apiKey" type="password" placeholder="X-API-Key" />
+  </div>
+  <button onclick="saveKey()">Save key</button>
+</header>
+
+<main>
+  <div class="card">
+    <h2>Accounts <span class="mut">— tried top-to-bottom; lowest priority first</span></h2>
+    <table>
+      <thead><tr><th>#</th><th>Label</th><th>1PSID</th><th>Status</th><th>On</th><th></th></tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="mut">Enter your API key to load accounts.</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Add account</h2>
+    <div class="row">
+      <div><label>Label</label><input id="nLabel" placeholder="primary" /></div>
+    </div>
+    <label>__Secure-1PSID</label>
+    <textarea id="nPsid" placeholder="paste cookie value"></textarea>
+    <label>__Secure-1PSIDTS</label>
+    <textarea id="nPsidts" placeholder="paste cookie value (recommended)"></textarea>
+    <div class="hint">DevTools → Network → click any gemini.google.com request → copy these two cookie values.</div>
+    <div class="row" style="margin-top:14px">
+      <button onclick="testNew()">Test cookies</button>
+      <button class="primary" onclick="addAccount()">Add account</button>
+    </div>
+    <pre id="testOut" style="display:none"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Try a prompt <span class="mut">— end-to-end, uses failover</span></h2>
+    <textarea id="prompt" placeholder="Write a haiku about the sea"></textarea>
+    <label>Model (optional)</label>
+    <input id="model" placeholder="leave blank for default" />
+    <div class="row" style="margin-top:12px"><button class="primary" onclick="runPrompt()">Send</button></div>
+    <pre id="genOut" style="display:none"></pre>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const keyInput = $("apiKey");
+keyInput.value = localStorage.getItem("gem_api_key") || "";
+
+function toast(msg, isErr) {
+  const t = $("toast"); t.textContent = msg;
+  t.style.borderColor = isErr ? "var(--err)" : "var(--ok)";
+  t.style.display = "block"; setTimeout(() => (t.style.display = "none"), 3500);
+}
+function saveKey() { localStorage.setItem("gem_api_key", keyInput.value.trim()); loadAccounts(); }
+
+async function api(path, method, body) {
+  const res = await fetch(path, {
+    method: method || "GET",
+    headers: { "Content-Type": "application/json", "X-API-Key": keyInput.value.trim() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+  return data;
+}
+
+function statusClass(s) { return ({ ok:"s-ok", error:"s-error", untested:"s-untested" })[s] || "s-other"; }
+
+async function loadAccounts() {
+  try {
+    const { accounts } = await api("/api/accounts");
+    $("rows").innerHTML = accounts.length ? accounts.map(rowHtml).join("")
+      : '<tr><td colspan="6" class="mut">No accounts yet — add one below.</td></tr>';
+  } catch (e) { $("rows").innerHTML = `<tr><td colspan="6" class="s-error">${e.message}</td></tr>`; }
+}
+
+function rowHtml(a) {
+  const st = `<span class="pill ${statusClass(a.status)}" title="${(a.status_detail||"").replace(/"/g,"'")}">${a.status}</span>`;
+  return `<tr>
+    <td>${a.priority}</td>
+    <td>${a.label}</td>
+    <td class="mut">${a.secure_1psid}</td>
+    <td>${st}</td>
+    <td><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="toggle('${a.id}', this.checked)"></td>
+    <td class="actions">
+      <button onclick="testOne('${a.id}')">Test</button>
+      <button onclick="reprio('${a.id}')">Priority</button>
+      <button class="danger" onclick="del('${a.id}','${a.label}')">Delete</button>
+    </td></tr>`;
+}
+
+async function addAccount() {
+  const label = $("nLabel").value.trim(), psid = $("nPsid").value.trim(), psidts = $("nPsidts").value.trim();
+  if (!label || !psid) return toast("Label and __Secure-1PSID are required", true);
+  try {
+    await api("/api/accounts", "POST", { label, secure_1psid: psid, secure_1psidts: psidts });
+    $("nLabel").value = $("nPsid").value = $("nPsidts").value = "";
+    toast("Account added"); loadAccounts();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function testNew() {
+  const psid = $("nPsid").value.trim(), psidts = $("nPsidts").value.trim();
+  if (!psid) return toast("Paste __Secure-1PSID first", true);
+  show("testOut", "Testing…");
+  try { const r = await api("/api/test", "POST", { secure_1psid: psid, secure_1psidts: psidts });
+    show("testOut", (r.ok ? "✅ " : "❌ ") + r.detail);
+  } catch (e) { show("testOut", "❌ " + e.message); }
+}
+
+async function testOne(id) {
+  try { const r = await api(`/api/accounts/${id}/test`, "POST");
+    toast((r.ok ? "✅ " : "❌ ") + r.detail, !r.ok); loadAccounts();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function toggle(id, enabled) {
+  try { await api(`/api/accounts/${id}`, "PATCH", { enabled }); loadAccounts(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function reprio(id) {
+  const v = prompt("New priority number (lower = tried first):");
+  if (v === null) return;
+  try { await api(`/api/accounts/${id}`, "PATCH", { priority: parseInt(v, 10) }); loadAccounts(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function del(id, label) {
+  if (!confirm(`Delete account "${label}"?`)) return;
+  try { await api(`/api/accounts/${id}`, "DELETE"); toast("Deleted"); loadAccounts(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function runPrompt() {
+  const p = $("prompt").value.trim(); if (!p) return toast("Enter a prompt", true);
+  show("genOut", "Generating…");
+  try {
+    const r = await api("/generate", "POST", { prompt: p, model: $("model").value.trim() || null });
+    const media = [...r.images, ...r.videos, ...r.audio].map(m => m.url).join("\n");
+    show("genOut", `account: ${r.account}\n\n${r.text || "(no text)"}` + (media ? `\n\nmedia:\n${media}` : ""));
+  } catch (e) { show("genOut", "❌ " + e.message); }
+}
+
+function show(id, txt) { const el = $(id); el.style.display = "block"; el.textContent = txt; }
+
+if (keyInput.value) loadAccounts();
+</script>
+</body>
+</html>

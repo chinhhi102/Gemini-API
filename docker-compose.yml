@@ -1,0 +1,20 @@
+services:
+  gemini-service:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # --- required ---
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
+      # --- optional ---
+      # Accounts are added via the admin UI at runtime, not here. These two are
+      # only an optional one-time seed for the first account on a fresh volume.
+      GEMINI_SECURE_1PSID: ${GEMINI_SECURE_1PSID:-}
+      GEMINI_SECURE_1PSIDTS: ${GEMINI_SECURE_1PSIDTS:-}
+      GEMINI_PROXY: ${GEMINI_PROXY:-}
+      DATA_DIR: /data
+      GEMINI_COOKIE_PATH: /data/cookies
+    volumes:
+      # Persist accounts.json, downloaded media, and refreshed cookies.
+      - ./data:/data
+    restart: unless-stopped
