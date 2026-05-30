@@ -3,13 +3,22 @@
 Supports multiple Gemini accounts with automatic failover (primary → backup),
 managed at runtime through a small admin UI rather than environment variables.
 
-This service is a pass-through transporter: it returns Gemini's response exactly
-as received (text and the original media URLs), without downloading or storing
-any media itself.
+Media handling is selectable per request via `media`:
+  - "url"    : pass-through — Gemini's original URLs (need the session to fetch).
+  - "base64" : the service downloads the bytes (with the account's session) and
+               returns them inline as base64.
+  - "stream" : the service downloads the bytes and returns a short-lived
+               `stream_url` (GET /media/{id}, behind the API key) for binary
+               streaming — ideal for piping into object storage (e.g. MinIO).
 """
 
+import asyncio
+import base64
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -21,6 +30,8 @@ from gemini_webapi.types import ModelOutput
 
 from .accounts import AccountManager, AccountStore, NoHealthyAccount
 from .config import config
+from .media import MediaCache, download_one, guess_mime
+from .watermark import dewatermark_file
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -31,35 +42,34 @@ STATIC_DIR = Path(__file__).parent / "static"
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="User text prompt")
     model: str | None = Field(None, description="Model name, e.g. 'gemini-3-pro'")
+    media: Literal["url", "base64", "stream"] = Field(
+        "url", description="How media is returned: url | base64 | stream"
+    )
+    remove_watermark: bool = Field(
+        False,
+        description=(
+            "Strip Gemini's visible corner watermark from generated images. "
+            "Requires media=base64 or stream (the bytes must be downloaded); "
+            "ignored for media=url. Does not affect invisible SynthID."
+        ),
+    )
 
 
-class ImageOut(BaseModel):
-    url: str = Field(..., description="Original Gemini image URL")
+class MediaItem(BaseModel):
+    kind: str = Field(..., description="image | video | audio")
     title: str = ""
-    alt: str = ""
-
-
-class VideoOut(BaseModel):
-    url: str = Field(..., description="Original Gemini video (mp4) URL")
-    title: str = ""
-    thumbnail: str = ""
-
-
-class MediaOut(BaseModel):
-    mp4_url: str = Field("", description="Original mp4 URL, if any")
-    mp3_url: str = Field("", description="Original audio (mp3) URL, if any")
-    title: str = ""
-    thumbnail: str = ""
-    mp3_thumbnail: str = ""
+    source_url: str = Field("", description="Gemini's original URL")
+    mime_type: str | None = Field(None, description="Set when downloaded")
+    size: int | None = Field(None, description="Bytes, set when downloaded")
+    data_base64: str | None = Field(None, description="Set when media=base64")
+    stream_url: str | None = Field(None, description="GET it (with API key) when media=stream")
 
 
 class GenerateResponse(BaseModel):
     account: str = Field(..., description="Label of the account that served the request")
     text: str = ""
     thoughts: str | None = None
-    images: list[ImageOut] = []
-    videos: list[VideoOut] = []
-    audio: list[MediaOut] = []
+    media: list[MediaItem] = []
     metadata: list[str] = Field(default=[], description="[chat_id, reply_id, ...]")
 
 
@@ -122,6 +132,7 @@ async def lifespan(app: FastAPI):
     store = AccountStore(config.accounts_path)
     _seed_from_env(store)
     app.state.manager = AccountManager(store, config.proxy, config.request_timeout)
+    app.state.cache = MediaCache(config.media_cache_dir, config.media_cache_ttl)
     try:
         yield
     finally:
@@ -130,8 +141,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Gemini Web Service",
-    version="2.1.0",
-    summary="Multi-account Gemini proxy. Pass-through: returns Gemini's response as-is.",
+    version="3.0.0",
+    summary="Multi-account Gemini proxy with selectable media delivery (url/base64/stream).",
     lifespan=lifespan,
 )
 
@@ -148,21 +159,43 @@ def _store(request: Request) -> AccountStore:
     return request.app.state.manager.store
 
 
-def _build_response(account_label: str, output: ModelOutput) -> GenerateResponse:
-    """Map Gemini's output to the response schema using its original URLs."""
+def _media_entries(output: ModelOutput) -> list[tuple]:
+    """Flatten the output into (kind, title, source_url, media_object) tuples."""
 
-    return GenerateResponse(
-        account=account_label,
-        text=output.text,
-        thoughts=output.thoughts,
-        images=[ImageOut(url=i.url, title=i.title, alt=i.alt) for i in output.images],
-        videos=[VideoOut(url=v.url, title=v.title, thumbnail=getattr(v, "thumbnail", ""))
-                for v in output.videos],
-        audio=[MediaOut(mp4_url=m.url, mp3_url=m.mp3_url, title=m.title,
-                        thumbnail=m.thumbnail, mp3_thumbnail=m.mp3_thumbnail)
-               for m in output.media],
-        metadata=output.metadata,
-    )
+    entries = [("image", i.title, i.url, i) for i in output.images]
+    entries += [("video", v.title, v.url, v) for v in output.videos]
+    entries += [("audio", m.title, m.mp3_url or m.url, m) for m in output.media]
+    return entries
+
+
+async def _proxy_media(entries, session, mode, request, dewatermark=False) -> list[MediaItem]:
+    """Download each media item via the account session; inline or cache for stream."""
+
+    items: list[MediaItem] = []
+    work_dir = Path(tempfile.mkdtemp(prefix="gemgen_"))
+    try:
+        for kind, title, url, obj in entries:
+            path = await download_one(kind, obj, session, str(work_dir))
+            if not path:
+                items.append(MediaItem(kind=kind, title=title, source_url=url))
+                continue
+            if dewatermark and kind == "image":
+                await asyncio.to_thread(dewatermark_file, path)  # CPU-bound; off-loop
+            items.append(_to_item(kind, title, url, path, mode, request))
+        return items
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _to_item(kind, title, url, path, mode, request) -> MediaItem:
+    mime, size = guess_mime(path), Path(path).stat().st_size
+    base = MediaItem(kind=kind, title=title, source_url=url, mime_type=mime, size=size)
+    if mode == "base64":
+        base.data_base64 = base64.b64encode(Path(path).read_bytes()).decode()
+    else:  # stream
+        media_id = request.app.state.cache.add(path, mime, Path(path).name)
+        base.stream_url = f"{str(request.base_url).rstrip('/')}/media/{media_id}"
+    return base
 
 
 # --------------------------------------------------------------------------- #
@@ -240,10 +273,37 @@ async def test_cookies(body: CookieTest, request: Request) -> dict:
 # --------------------------------------------------------------------------- #
 @app.post("/generate", response_model=GenerateResponse, dependencies=[Auth])
 async def generate(req: GenerateRequest, request: Request) -> GenerateResponse:
+    manager = request.app.state.manager
     model = req.model or Model.UNSPECIFIED
     try:
-        output, account = await request.app.state.manager.generate(req.prompt, model)
+        output, account = await manager.generate(req.prompt, model)
     except NoHealthyAccount as exc:
         raise HTTPException(status_code=502, detail={"message": "All accounts failed",
                                                      "attempts": exc.attempts})
-    return _build_response(account["label"], output)
+
+    entries = _media_entries(output)
+    if req.media == "url":
+        media = [MediaItem(kind=k, title=t, source_url=u) for k, t, u, _ in entries]
+    else:
+        session = manager.session_for(account["id"])
+        media = await _proxy_media(
+            entries, session, req.media, request, req.remove_watermark
+        )
+
+    return GenerateResponse(
+        account=account["label"],
+        text=output.text,
+        thoughts=output.thoughts,
+        media=media,
+        metadata=output.metadata,
+    )
+
+
+@app.get("/media/{media_id}", dependencies=[Auth])
+async def get_media(media_id: str, request: Request) -> FileResponse:
+    """Stream a previously downloaded media file (mode=stream). Behind the API key."""
+
+    entry = request.app.state.cache.get(media_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Media not found or expired")
+    return FileResponse(entry["path"], media_type=entry["mime"], filename=entry["filename"])

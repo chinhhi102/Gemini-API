@@ -2,3 +2,6 @@
 fastapi~=0.115
 uvicorn[standard]~=0.34
 python-dotenv~=1.0
+# Visible-watermark removal (service/watermark.py).
+pillow~=11.0
+numpy~=2.1

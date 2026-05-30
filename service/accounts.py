@@ -131,6 +131,12 @@ class AccountManager:
     def _lock(self, account_id: str) -> asyncio.Lock:
         return self._locks.setdefault(account_id, asyncio.Lock())
 
+    def session_for(self, account_id: str):
+        """The live account's authenticated AsyncSession, for media downloads."""
+
+        client = self._clients.get(account_id)
+        return client.client if client else None
+
     async def _get_client(self, account: dict) -> GeminiClient:
         """Return an initialised client for the account, creating it lazily."""
 
