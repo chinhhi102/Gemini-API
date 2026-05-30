@@ -5,3 +5,7 @@ python-dotenv~=1.0
 # Visible-watermark removal (service/watermark.py).
 pillow~=11.0
 numpy~=2.1
+# Async job webhooks (service/jobs.py) and Redis-backed job state (optional;
+# only used when REDIS_URL is set, but installed so it works out of the box).
+httpx~=0.28
+redis~=5.0

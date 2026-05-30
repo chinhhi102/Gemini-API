@@ -38,6 +38,10 @@ Accounts are stored in `accounts.json` on the data volume.
 | POST   | `/api/accounts/{id}/test`     | `X-API-Key` | Validate a stored account.           |
 | POST   | `/api/test`                   | `X-API-Key` | Validate arbitrary cookies.          |
 | POST   | `/generate`                   | `X-API-Key` | Generate content (with failover).    |
+| POST   | `/jobs`                       | `X-API-Key` | Submit an async generation job (202 + id). |
+| GET    | `/jobs`                       | `X-API-Key` | List jobs (newest first).            |
+| GET    | `/jobs/{id}`                  | `X-API-Key` | Poll a job's status / result.        |
+| DELETE | `/jobs/{id}`                  | `X-API-Key` | Delete a job.                        |
 | GET    | `/media/{id}`                 | `X-API-Key` | Stream a downloaded media file (`media=stream`). |
 | GET    | `/docs`                       | none        | Interactive OpenAPI docs.            |
 
@@ -66,6 +70,44 @@ Accounts are stored in `accounts.json` on the data volume.
       "stream_url": null }         // set when media=stream -> GET it with the API key
   ],
   "metadata": ["c_...", "r_..."] } // [chat_id, reply_id] for follow-ups later
+```
+
+### Async jobs — `POST /jobs` → poll `GET /jobs/{id}`
+
+For slow generations the client need not hold a connection open. Submit a job,
+get an id back immediately, then poll for the result (or receive a webhook). The
+request body is the same as `POST /generate`, plus an optional `callback_url`.
+
+```jsonc
+// POST /jobs  -> 202 Accepted
+{ "id": "9f2c…", "status": "queued", "result": null, "error": null,
+  "created_at": "…", "updated_at": "…" }
+```
+
+`GET /jobs/{id}` returns the current job; `status` moves through
+`queued → processing → completed | failed`:
+
+- `completed` → `result` holds the `GenerateResponse` (same shape as `/generate`).
+- `failed` → `error` holds the failure message.
+
+`GET /jobs` lists jobs (newest first); `DELETE /jobs/{id}` removes one.
+
+**Delivery.** Poll `GET /jobs/{id}`, or pass a `callback_url`: on completion the
+service POSTs `{id, status, result, error, created_at, updated_at}` to that URL
+(retried with backoff — see `JOB_CALLBACK_*`). Polling stays available either way.
+
+**State.** Job state lives in **Redis** when `REDIS_URL` is set, else in a local
+JSON file (`JOBS_PATH`). Both survive a restart; a job left mid-flight is
+re-queued on startup. Concurrency is bounded by `JOB_WORKERS`, and finished jobs
+are evicted after `JOB_TTL` seconds. A set-but-unreachable `REDIS_URL` is logged
+and degrades to the file store.
+
+```sh
+# submit, then poll until done
+ID=$(curl -s -X POST localhost:8000/jobs -H 'x-api-key: KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a red apple","media":"base64"}' | jq -r .id)
+curl -s localhost:8000/jobs/$ID -H 'x-api-key: KEY' | jq '{status, error}'
 ```
 
 ## Media delivery
@@ -175,6 +217,12 @@ curl -X POST localhost:8000/generate \
 | `REQUEST_TIMEOUT`       | no       | Per-request timeout in seconds (default 300).          |
 | `MEDIA_CACHE_DIR`       | no       | Dir for streamed-media buffer (`DATA_DIR/cache`).      |
 | `MEDIA_CACHE_TTL`       | no       | Seconds before streamed media is evicted (default 3600).|
+| `REDIS_URL`             | no       | Store async-job state in Redis; unset = local JSON file.|
+| `JOBS_PATH`             | no       | File-backed job store path (when no `REDIS_URL`).      |
+| `JOB_WORKERS`           | no       | Background workers draining the job queue (default 3). |
+| `JOB_TTL`               | no       | Seconds to keep finished jobs (default 86400).         |
+| `JOB_CALLBACK_TIMEOUT`  | no       | Webhook POST timeout in seconds (default 15).          |
+| `JOB_CALLBACK_RETRIES`  | no       | Webhook delivery attempts (default 3).                 |
 
 ## Notes & limits
 
