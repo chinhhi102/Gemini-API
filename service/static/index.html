@@ -86,6 +86,18 @@
     <textarea id="prompt" placeholder="Write a haiku about the sea"></textarea>
     <label>Model (optional)</label>
     <input id="model" placeholder="leave blank for default" />
+    <div class="row" style="margin-top:12px;align-items:center;gap:12px">
+      <label style="margin:0">Media
+        <select id="media">
+          <option value="url">url</option>
+          <option value="base64">base64</option>
+          <option value="stream">stream</option>
+        </select>
+      </label>
+      <label style="margin:0" title="Strips Gemini's visible corner logo from generated images (needs base64/stream). Does not affect SynthID.">
+        <input type="checkbox" id="rmWatermark" /> Remove watermark
+      </label>
+    </div>
     <div class="row" style="margin-top:12px"><button class="primary" onclick="runPrompt()">Send</button></div>
     <pre id="genOut" style="display:none"></pre>
   </div>
@@ -186,10 +198,13 @@ async function del(id, label) {
 
 async function runPrompt() {
   const p = $("prompt").value.trim(); if (!p) return toast("Enter a prompt", true);
+  const rmWatermark = $("rmWatermark").checked;
+  let media = $("media").value;
+  if (rmWatermark && media === "url") { media = "base64"; $("media").value = media; toast("Watermark removal needs base64/stream — switched to base64"); }
   show("genOut", "Generating…");
   try {
-    const r = await api("/generate", "POST", { prompt: p, model: $("model").value.trim() || null });
-    const media = [...r.images, ...r.videos, ...r.audio].map(m => m.url).join("\n");
+    const r = await api("/generate", "POST", { prompt: p, model: $("model").value.trim() || null, media, remove_watermark: rmWatermark });
+    const media = (r.media || []).map(m => `${m.kind}: ${m.stream_url || m.source_url || "(base64 " + (m.size || 0) + "B)"}`).join("\n");
     show("genOut", `account: ${r.account}\n\n${r.text || "(no text)"}` + (media ? `\n\nmedia:\n${media}` : ""));
   } catch (e) { show("genOut", "❌ " + e.message); }
 }

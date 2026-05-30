@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Gemini Web Service",
-    "summary": "Multi-account Gemini proxy. Pass-through: returns Gemini's response as-is.",
-    "version": "2.1.0"
+    "summary": "Multi-account Gemini proxy with selectable media delivery (url/base64/stream).",
+    "version": "3.0.0"
   },
   "paths": {
     "/health": {
@@ -388,6 +388,54 @@
           }
         }
       }
+    },
+    "/media/{media_id}": {
+      "get": {
+        "summary": "Get Media",
+        "description": "Stream a previously downloaded media file (mode=stream). Behind the API key.",
+        "operationId": "get_media_media__media_id__get",
+        "parameters": [
+          {
+            "name": "media_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Media Id"
+            }
+          },
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -599,6 +647,23 @@
             ],
             "title": "Model",
             "description": "Model name, e.g. 'gemini-3-pro'"
+          },
+          "media": {
+            "type": "string",
+            "enum": [
+              "url",
+              "base64",
+              "stream"
+            ],
+            "title": "Media",
+            "description": "How media is returned: url | base64 | stream",
+            "default": "url"
+          },
+          "remove_watermark": {
+            "type": "boolean",
+            "title": "Remove Watermark",
+            "description": "Strip Gemini's visible corner watermark from generated images. Requires media=base64 or stream (the bytes must be downloaded); ignored for media=url. Does not affect invisible SynthID.",
+            "default": false
           }
         },
         "type": "object",
@@ -630,28 +695,12 @@
             ],
             "title": "Thoughts"
           },
-          "images": {
+          "media": {
             "items": {
-              "$ref": "#/components/schemas/ImageOut"
+              "$ref": "#/components/schemas/MediaItem"
             },
             "type": "array",
-            "title": "Images",
-            "default": []
-          },
-          "videos": {
-            "items": {
-              "$ref": "#/components/schemas/VideoOut"
-            },
-            "type": "array",
-            "title": "Videos",
-            "default": []
-          },
-          "audio": {
-            "items": {
-              "$ref": "#/components/schemas/MediaOut"
-            },
-            "type": "array",
-            "title": "Audio",
+            "title": "Media",
             "default": []
           },
           "metadata": {
@@ -683,62 +732,78 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
-      "ImageOut": {
+      "MediaItem": {
         "properties": {
-          "url": {
+          "kind": {
             "type": "string",
-            "title": "Url",
-            "description": "Original Gemini image URL"
+            "title": "Kind",
+            "description": "image | video | audio"
           },
           "title": {
             "type": "string",
             "title": "Title",
             "default": ""
           },
-          "alt": {
+          "source_url": {
             "type": "string",
-            "title": "Alt",
+            "title": "Source Url",
+            "description": "Gemini's original URL",
             "default": ""
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type",
+            "description": "Set when downloaded"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size",
+            "description": "Bytes, set when downloaded"
+          },
+          "data_base64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Base64",
+            "description": "Set when media=base64"
+          },
+          "stream_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Url",
+            "description": "GET it (with API key) when media=stream"
           }
         },
         "type": "object",
         "required": [
-          "url"
+          "kind"
         ],
-        "title": "ImageOut"
-      },
-      "MediaOut": {
-        "properties": {
-          "mp4_url": {
-            "type": "string",
-            "title": "Mp4 Url",
-            "description": "Original mp4 URL, if any",
-            "default": ""
-          },
-          "mp3_url": {
-            "type": "string",
-            "title": "Mp3 Url",
-            "description": "Original audio (mp3) URL, if any",
-            "default": ""
-          },
-          "title": {
-            "type": "string",
-            "title": "Title",
-            "default": ""
-          },
-          "thumbnail": {
-            "type": "string",
-            "title": "Thumbnail",
-            "default": ""
-          },
-          "mp3_thumbnail": {
-            "type": "string",
-            "title": "Mp3 Thumbnail",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "MediaOut"
+        "title": "MediaItem"
       },
       "TestResult": {
         "properties": {
@@ -797,30 +862,6 @@
           "type"
         ],
         "title": "ValidationError"
-      },
-      "VideoOut": {
-        "properties": {
-          "url": {
-            "type": "string",
-            "title": "Url",
-            "description": "Original Gemini video (mp4) URL"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title",
-            "default": ""
-          },
-          "thumbnail": {
-            "type": "string",
-            "title": "Thumbnail",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "url"
-        ],
-        "title": "VideoOut"
       }
     }
   }

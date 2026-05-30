@@ -29,6 +29,11 @@ class Config:
         ).resolve()
         self.proxy = os.getenv("GEMINI_PROXY") or None
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "300"))
+        # Transient buffer for streamed media (mode="stream").
+        self.media_cache_dir = Path(
+            os.getenv("MEDIA_CACHE_DIR", str(data_dir / "cache"))
+        ).resolve()
+        self.media_cache_ttl = float(os.getenv("MEDIA_CACHE_TTL", "3600"))
         # Optional one-time seed for the first account (migration from .env).
         self.seed_1psid = os.getenv("GEMINI_SECURE_1PSID", "")
         self.seed_1psidts = os.getenv("GEMINI_SECURE_1PSIDTS", "")
