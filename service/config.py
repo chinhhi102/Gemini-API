@@ -34,6 +34,17 @@ class Config:
             os.getenv("MEDIA_CACHE_DIR", str(data_dir / "cache"))
         ).resolve()
         self.media_cache_ttl = float(os.getenv("MEDIA_CACHE_TTL", "3600"))
+        # Async generation jobs (POST /jobs): worker pool + durable state.
+        # State lives in Redis when REDIS_URL is set, else a local JSON file.
+        self.redis_url = os.getenv("REDIS_URL") or None
+        self.jobs_path = Path(
+            os.getenv("JOBS_PATH", str(data_dir / "jobs.json"))
+        ).resolve()
+        self.job_workers = int(os.getenv("JOB_WORKERS", "3"))
+        self.job_ttl = float(os.getenv("JOB_TTL", "86400"))
+        # Webhook callback delivery (optional per-job callback_url).
+        self.job_callback_timeout = float(os.getenv("JOB_CALLBACK_TIMEOUT", "15"))
+        self.job_callback_retries = int(os.getenv("JOB_CALLBACK_RETRIES", "3"))
         # Optional one-time seed for the first account (migration from .env).
         self.seed_1psid = os.getenv("GEMINI_SECURE_1PSID", "")
         self.seed_1psidts = os.getenv("GEMINI_SECURE_1PSIDTS", "")

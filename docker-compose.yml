@@ -15,7 +15,23 @@ services:
       GEMINI_PROXY: ${GEMINI_PROXY:-}
       DATA_DIR: /data
       GEMINI_COOKIE_PATH: /data/cookies
+      # Async jobs (POST /jobs). Leave REDIS_URL empty to use the file-backed
+      # store; set it (e.g. redis://redis:6379/0) to keep job state in Redis.
+      REDIS_URL: ${REDIS_URL:-}
+      JOB_WORKERS: ${JOB_WORKERS:-3}
+      JOB_TTL: ${JOB_TTL:-86400}
+      JOB_CALLBACK_TIMEOUT: ${JOB_CALLBACK_TIMEOUT:-15}
+      JOB_CALLBACK_RETRIES: ${JOB_CALLBACK_RETRIES:-3}
     volumes:
       # Persist accounts.json, downloaded media, and refreshed cookies.
       - ./data:/data
     restart: unless-stopped
+
+  # Optional: a local Redis for job state. Uncomment this service and set
+  # REDIS_URL=redis://redis:6379/0 in your .env to use it instead of the file
+  # store. If staging already provides Redis, point REDIS_URL there instead.
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./data/redis:/data
