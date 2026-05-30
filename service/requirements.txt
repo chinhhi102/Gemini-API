@@ -1,0 +1,4 @@
+# The Gemini-API package itself is installed from the repo (see Dockerfile).
+fastapi~=0.115
+uvicorn[standard]~=0.34
+python-dotenv~=1.0
