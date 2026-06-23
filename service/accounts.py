@@ -127,6 +127,7 @@ class AccountManager:
         self.timeout = timeout
         self._clients: dict[str, GeminiClient] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._rotation = 0  # round-robin cursor across enabled accounts
 
     def _lock(self, account_id: str) -> asyncio.Lock:
         return self._locks.setdefault(account_id, asyncio.Lock())
@@ -165,12 +166,24 @@ class AccountManager:
             await client.close()
 
     async def generate(self, prompt: str, model) -> tuple:
-        """Try enabled accounts by priority; return (output, account) on success."""
+        """Round-robin across enabled accounts; fail over to the rest on error.
+
+        Each call starts from the next account in rotation so traffic is spread
+        evenly (no single account absorbs every request and burns its usage
+        window while the others idle). On error the remaining accounts are still
+        tried, so a single call only fails when every enabled account fails.
+        """
 
         attempts: list[dict] = []
-        for account in self.store.list():
-            if not account["enabled"]:
-                continue
+        enabled = [a for a in self.store.list() if a["enabled"]]
+        if not enabled:
+            raise NoHealthyAccount(attempts)
+
+        start = self._rotation % len(enabled)
+        self._rotation = (start + 1) % len(enabled)
+        ordered = enabled[start:] + enabled[:start]
+
+        for account in ordered:
             try:
                 client = await self._get_client(account)
                 output = await client.generate_content(prompt, model=model)
