@@ -13,6 +13,16 @@ except ImportError:
     pass
 
 
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRUE
+
+
 class Config:
     """Service configuration sourced from environment variables.
 
@@ -33,7 +43,11 @@ class Config:
         self.media_cache_dir = Path(
             os.getenv("MEDIA_CACHE_DIR", str(data_dir / "cache"))
         ).resolve()
-        self.media_cache_ttl = float(os.getenv("MEDIA_CACHE_TTL", "3600"))
+        self.media_cache_ttl = float(os.getenv("MEDIA_CACHE_TTL", "900"))
+        # Strip Gemini's visible watermark from ALL generated images regardless of
+        # the per-request flag. Forces a download (url mode is upgraded to stream),
+        # since the bytes must be fetched to be cleaned.
+        self.force_remove_watermark = _bool_env("FORCE_REMOVE_WATERMARK", True)
         # Async generation jobs (POST /jobs): worker pool + durable state.
         # State lives in Redis when REDIS_URL is set, else a local JSON file.
         self.redis_url = os.getenv("REDIS_URL") or None

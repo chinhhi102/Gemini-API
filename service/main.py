@@ -50,8 +50,10 @@ class GenerateRequest(BaseModel):
         False,
         description=(
             "Strip Gemini's visible corner watermark from generated images. "
-            "Requires media=base64 or stream (the bytes must be downloaded); "
-            "ignored for media=url. Does not affect invisible SynthID."
+            "The bytes must be downloaded to be cleaned: media=url is upgraded "
+            "to stream when removal applies. Does not affect invisible SynthID. "
+            "Note: the server may force removal on for all requests via "
+            "FORCE_REMOVE_WATERMARK, in which case this flag can only add to it."
         ),
     )
 
@@ -258,12 +260,21 @@ async def perform_generation(
     output, account = await manager.generate(req.prompt, model)
 
     entries = _media_entries(output)
-    if req.media == "url":
+
+    # Watermark stripping needs the bytes, so url mode can't honour it. When
+    # removal is in force and the output carries an image, upgrade url -> stream
+    # so the server downloads, cleans, and re-serves it.
+    dewatermark = req.remove_watermark or config.force_remove_watermark
+    media_mode = req.media
+    if dewatermark and media_mode == "url" and any(k == "image" for k, *_ in entries):
+        media_mode = "stream"
+
+    if media_mode == "url":
         media = [MediaItem(kind=k, title=t, source_url=u) for k, t, u, _ in entries]
     else:
         session = manager.session_for(account["id"])
         media = await _proxy_media(
-            entries, session, req.media, cache, base_url, req.remove_watermark
+            entries, session, media_mode, cache, base_url, dewatermark
         )
 
     return GenerateResponse(
