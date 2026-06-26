@@ -52,12 +52,14 @@ Accounts are stored in `accounts.json` on the data volume.
 { "prompt": "Generate an image of a red bicycle on a beach",
   "model": "gemini-3-pro",        // optional; omit for the default model
   "media": "url",                 // url | base64 | stream  (default: url)
+  "res-type": "image",            // optional; expected modality (see below)
   "remove_watermark": false }     // strip the visible corner logo (needs base64/stream)
 ```
 
 ```jsonc
 // response — unified media[] list
-{ "account": "primary",            // which account served the request
+{ "status": "completed",           // completed | failed (see "Expecting a response type")
+  "account": "primary",            // which account served the request
   "text": "...",
   "thoughts": null,
   "media": [
@@ -88,7 +90,9 @@ request body is the same as `POST /generate`, plus an optional `callback_url`.
 `queued → processing → completed | failed`:
 
 - `completed` → `result` holds the `GenerateResponse` (same shape as `/generate`).
-- `failed` → `error` holds the failure message.
+- `failed` → `error` holds the failure message **or**, when a `res-type` was set
+  and the response lacked that modality, `result` still holds the `GenerateResponse`
+  (with its own `"status": "failed"`) so you can inspect what came back.
 
 `GET /jobs` lists jobs (newest first); `DELETE /jobs/{id}` removes one.
 
@@ -108,6 +112,61 @@ ID=$(curl -s -X POST localhost:8000/jobs -H 'x-api-key: KEY' \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a red apple","media":"base64"}' | jq -r .id)
 curl -s localhost:8000/jobs/$ID -H 'x-api-key: KEY' | jq '{status, error}'
+```
+
+## Expecting a response type (`res-type`)
+
+Gemini doesn't always return what you asked for — an image prompt can come back
+as a plain text refusal (e.g. *"I can create more images as soon as your limit
+resets"*) with no media. `res-type` lets you declare the modality you expect so
+the service can tell you whether the response actually delivered it.
+
+Set `res-type` to one of `text` | `image` | `video` | `audio`:
+
+- If the response **contains** that modality → `status: "completed"`.
+- If it **does not** → `status: "failed"`. The result is **still returned** (text,
+  media, metadata) — only the status flips, so you can log or inspect what came back.
+- Omit `res-type` entirely → no enforcement; `status` is always `"completed"`
+  (unchanged behaviour for existing callers).
+
+| `res-type` | "completed" when the response has… |
+|------------|-------------------------------------|
+| `text`     | non-empty text                      |
+| `image`    | at least one image                  |
+| `video`    | at least one video                  |
+| `audio`    | at least one audio item             |
+
+### `/generate` (synchronous)
+
+The HTTP status is **always 200** — branch on the `status` field in the body:
+
+```sh
+# Expect an image. If Gemini returns only text, status comes back "failed".
+curl -s -X POST localhost:8000/generate -H 'x-api-key: KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Generate an image of a red fox","media":"base64","res-type":"image"}' \
+  | jq '{status, account, text, n_media: (.media | length)}'
+```
+
+```jsonc
+// when the image quota is exhausted and only text comes back:
+{ "status": "failed", "account": "photo01",
+  "text": "I can create more images as soon as your limit resets.",
+  "n_media": 0 }
+```
+
+### `/jobs` (asynchronous)
+
+The job's own `status` becomes `failed` when the requested `res-type` is missing,
+and `result` still carries the `GenerateResponse`:
+
+```sh
+ID=$(curl -s -X POST localhost:8000/jobs -H 'x-api-key: KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Generate an image of a red fox","media":"base64","res-type":"image"}' \
+  | jq -r .id)
+curl -s localhost:8000/jobs/$ID -H 'x-api-key: KEY' | jq '{status, result_status: .result.status}'
+# -> { "status": "failed", "result_status": "failed" }   (result still populated)
 ```
 
 ## Media delivery
