@@ -29,6 +29,7 @@ from gemini_webapi.constants import Model
 from gemini_webapi.types import ModelOutput
 
 from .accounts import AccountManager, AccountStore, NoHealthyAccount
+from .settings import SettingsStore
 from .config import config
 from .jobs import JobQueue, JobStatus, build_job_store
 from .media import MediaCache, download_one, guess_mime
@@ -146,6 +147,15 @@ class DeleteResult(BaseModel):
     deleted: str
 
 
+class SettingsOut(BaseModel):
+    default_model: str = Field(..., description="Model used when a request omits one")
+    available_models: list[str] = Field(default=[], description="Selectable model names")
+
+
+class SettingsIn(BaseModel):
+    default_model: str = Field(..., min_length=1)
+
+
 # --------------------------------------------------------------------------- #
 # App setup
 # --------------------------------------------------------------------------- #
@@ -162,6 +172,7 @@ async def lifespan(app: FastAPI):
     _seed_from_env(store)
     app.state.manager = AccountManager(store, config.proxy, config.request_timeout)
     app.state.cache = MediaCache(config.media_cache_dir, config.media_cache_ttl)
+    app.state.settings = SettingsStore(config.settings_path)
 
     job_store = await build_job_store(config.redis_url, config.jobs_path, config.job_ttl)
 
@@ -170,7 +181,9 @@ async def lifespan(app: FastAPI):
         # so stream URLs stay valid even though the worker has no live request.
         base_url = stored.get("base_url", "")
         gen = GenerateRequest.model_validate(stored)
-        result = await perform_generation(app.state.manager, app.state.cache, base_url, gen)
+        result = await perform_generation(
+            app.state.manager, app.state.cache, base_url, gen, app.state.settings.default_model
+        )
         return result.model_dump()
 
     app.state.jobs = JobQueue(
@@ -248,15 +261,24 @@ def _to_item(kind, title, url, path, mode, cache, base_url) -> MediaItem:
 
 
 async def perform_generation(
-    manager: AccountManager, cache: MediaCache, base_url: str, req: GenerateRequest
+    manager: AccountManager,
+    cache: MediaCache,
+    base_url: str,
+    req: GenerateRequest,
+    default_model: str,
 ) -> GenerateResponse:
     """Run a generation with failover and assemble the response (media included).
 
     Shared by the synchronous ``/generate`` endpoint and the async job worker, so
     both paths behave identically. ``base_url`` is used to build stream URLs.
+
+    ``default_model`` (configured in the admin UI) is used when the request omits
+    a model: the UNSPECIFIED bucket shares the strict default image-generation
+    quota and exhausts quickly, returning a "limit resets" text with no media,
+    whereas a concrete model has its own quota and reliably returns images.
     """
 
-    model = req.model or Model.UNSPECIFIED
+    model = req.model or default_model
     output, account = await manager.generate(req.prompt, model)
 
     entries = _media_entries(output)
@@ -356,6 +378,21 @@ async def test_cookies(body: CookieTest, request: Request) -> dict:
     return {"ok": ok, "detail": detail}
 
 
+@app.get("/api/settings", response_model=SettingsOut, dependencies=[Auth])
+async def get_settings(request: Request) -> dict:
+    return request.app.state.settings.public_view()
+
+
+@app.put("/api/settings", response_model=SettingsOut, dependencies=[Auth])
+async def update_settings(body: SettingsIn, request: Request) -> dict:
+    settings = request.app.state.settings
+    try:
+        settings.set_default_model(body.default_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return settings.public_view()
+
+
 # --------------------------------------------------------------------------- #
 # Generation (with failover across accounts)
 # --------------------------------------------------------------------------- #
@@ -367,6 +404,7 @@ async def generate(req: GenerateRequest, request: Request) -> GenerateResponse:
             request.app.state.cache,
             str(request.base_url),
             req,
+            request.app.state.settings.default_model,
         )
     except NoHealthyAccount as exc:
         raise HTTPException(status_code=502, detail={"message": "All accounts failed",
