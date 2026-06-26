@@ -186,7 +186,12 @@ class AccountManager:
         for account in ordered:
             try:
                 client = await self._get_client(account)
-                output = await client.generate_content(prompt, model=model)
+                # Cap the generation itself, not just init: a hung Gemini response
+                # would otherwise pin a job worker forever (TimeoutError is caught
+                # below, so it just fails over to the next account).
+                output = await asyncio.wait_for(
+                    client.generate_content(prompt, model=model), timeout=self.timeout
+                )
                 self.store.set_status(account["id"], "ok")
                 return output, account
             except (AuthError, UsageLimitExceeded, GeminiError, Exception) as exc:
