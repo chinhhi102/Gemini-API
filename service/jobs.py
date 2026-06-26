@@ -342,9 +342,12 @@ class JobQueue:
         await self.store.update(job_id, status=JobStatus.PROCESSING.value)
         try:
             result = await self.handler(job["request"])
-            done = await self.store.update(
-                job_id, status=JobStatus.COMPLETED.value, result=result
-            )
+            # A handler may self-flag its result as failed (e.g. the response
+            # lacked the requested res-type). Honour that terminal status while
+            # still persisting the result so the client can inspect it.
+            failed = isinstance(result, dict) and result.get("status") == JobStatus.FAILED.value
+            status = JobStatus.FAILED.value if failed else JobStatus.COMPLETED.value
+            done = await self.store.update(job_id, status=status, result=result)
         except Exception as exc:  # noqa: BLE001 - surfaced to the client via the job
             logger.warning(f"Job {job_id} failed: {exc}")
             done = await self.store.update(

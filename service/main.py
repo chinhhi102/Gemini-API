@@ -22,7 +22,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from gemini_webapi import set_log_level
 from gemini_webapi.constants import Model
@@ -42,8 +42,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 # Request / response schemas (drive the OpenAPI docs at /docs)
 # --------------------------------------------------------------------------- #
 class GenerateRequest(BaseModel):
+    # Accept the hyphenated `res-type` from JSON while exposing `res_type` in code.
+    model_config = ConfigDict(populate_by_name=True)
+
     prompt: str = Field(..., min_length=1, description="User text prompt")
     model: str | None = Field(None, description="Model name, e.g. 'gemini-3-pro'")
+    res_type: Literal["text", "image", "video", "audio"] | None = Field(
+        None,
+        alias="res-type",
+        description=(
+            "Expected output modality. When set, a response that does NOT contain "
+            "that modality is marked status='failed' (the result is still returned). "
+            "Omit for no enforcement (status is always 'completed')."
+        ),
+    )
     media: Literal["url", "base64", "stream"] = Field(
         "url", description="How media is returned: url | base64 | stream"
     )
@@ -70,6 +82,13 @@ class MediaItem(BaseModel):
 
 
 class GenerateResponse(BaseModel):
+    status: str = Field(
+        "completed",
+        description=(
+            "completed | failed. 'failed' when res-type was set but the response "
+            "lacked that modality; the result fields are still populated."
+        ),
+    )
     account: str = Field(..., description="Label of the account that served the request")
     text: str = ""
     thoughts: str | None = None
@@ -230,6 +249,20 @@ def _media_entries(output: ModelOutput) -> list[tuple]:
     return entries
 
 
+def _has_modality(res_type: str, output: ModelOutput) -> bool:
+    """Whether the generation output carries the requested response modality."""
+
+    if res_type == "text":
+        return bool((output.text or "").strip())
+    if res_type == "image":
+        return bool(output.images)
+    if res_type == "video":
+        return bool(output.videos)
+    if res_type == "audio":
+        return bool(output.media)
+    return True
+
+
 async def _proxy_media(entries, session, mode, cache, base_url, dewatermark=False) -> list[MediaItem]:
     """Download each media item via the account session; inline or cache for stream."""
 
@@ -299,7 +332,13 @@ async def perform_generation(
             entries, session, media_mode, cache, base_url, dewatermark
         )
 
+    # When the caller declared an expected res-type, a response missing that
+    # modality is a failure — still returned, but flagged so the job worker can
+    # mark the job 'failed' and sync callers can branch on response.status.
+    status = "failed" if req.res_type and not _has_modality(req.res_type, output) else "completed"
+
     return GenerateResponse(
+        status=status,
         account=account["label"],
         text=output.text,
         thoughts=output.thoughts,

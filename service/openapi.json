@@ -339,6 +339,94 @@
         }
       }
     },
+    "/api/settings": {
+      "get": {
+        "summary": "Get Settings",
+        "operationId": "get_settings_api_settings_get",
+        "parameters": [
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Update Settings",
+        "operationId": "update_settings_api_settings_put",
+        "parameters": [
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/generate": {
       "post": {
         "summary": "Generate",
@@ -833,6 +921,24 @@
             "title": "Model",
             "description": "Model name, e.g. 'gemini-3-pro'"
           },
+          "res-type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "image",
+                  "video",
+                  "audio"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Res-Type",
+            "description": "Expected output modality. When set, a response that does NOT contain that modality is marked status='failed' (the result is still returned). Omit for no enforcement (status is always 'completed')."
+          },
           "media": {
             "type": "string",
             "enum": [
@@ -847,7 +953,7 @@
           "remove_watermark": {
             "type": "boolean",
             "title": "Remove Watermark",
-            "description": "Strip Gemini's visible corner watermark from generated images. Requires media=base64 or stream (the bytes must be downloaded); ignored for media=url. Does not affect invisible SynthID.",
+            "description": "Strip Gemini's visible corner watermark from generated images. The bytes must be downloaded to be cleaned: media=url is upgraded to stream when removal applies. Does not affect invisible SynthID. Note: the server may force removal on for all requests via FORCE_REMOVE_WATERMARK, in which case this flag can only add to it.",
             "default": false
           }
         },
@@ -859,6 +965,12 @@
       },
       "GenerateResponse": {
         "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "completed | failed. 'failed' when res-type was set but the response lacked that modality; the result fields are still populated.",
+            "default": "completed"
+          },
           "account": {
             "type": "string",
             "title": "Account",
@@ -1003,6 +1115,24 @@
             "title": "Model",
             "description": "Model name, e.g. 'gemini-3-pro'"
           },
+          "res-type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "image",
+                  "video",
+                  "audio"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Res-Type",
+            "description": "Expected output modality. When set, a response that does NOT contain that modality is marked status='failed' (the result is still returned). Omit for no enforcement (status is always 'completed')."
+          },
           "media": {
             "type": "string",
             "enum": [
@@ -1017,7 +1147,7 @@
           "remove_watermark": {
             "type": "boolean",
             "title": "Remove Watermark",
-            "description": "Strip Gemini's visible corner watermark from generated images. Requires media=base64 or stream (the bytes must be downloaded); ignored for media=url. Does not affect invisible SynthID.",
+            "description": "Strip Gemini's visible corner watermark from generated images. The bytes must be downloaded to be cleaned: media=url is upgraded to stream when removal applies. Does not affect invisible SynthID. Note: the server may force removal on for all requests via FORCE_REMOVE_WATERMARK, in which case this flag can only add to it.",
             "default": false
           },
           "callback_url": {
@@ -1122,6 +1252,43 @@
           "kind"
         ],
         "title": "MediaItem"
+      },
+      "SettingsIn": {
+        "properties": {
+          "default_model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Default Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "default_model"
+        ],
+        "title": "SettingsIn"
+      },
+      "SettingsOut": {
+        "properties": {
+          "default_model": {
+            "type": "string",
+            "title": "Default Model",
+            "description": "Model used when a request omits one"
+          },
+          "available_models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Available Models",
+            "description": "Selectable model names",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "default_model"
+        ],
+        "title": "SettingsOut"
       },
       "TestResult": {
         "properties": {
