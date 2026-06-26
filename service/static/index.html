@@ -82,6 +82,18 @@
   </div>
 
   <div class="card">
+    <h2>Default model <span class="mut">— used when a request sends no model</span></h2>
+    <div class="row" style="align-items:flex-end">
+      <div>
+        <label>Model</label>
+        <select id="defaultModel"><option>Enter your API key to load</option></select>
+      </div>
+      <button class="primary" onclick="saveSettings()">Save</button>
+    </div>
+    <div class="hint" id="modelHint">Requests with no model fall back to this.</div>
+  </div>
+
+  <div class="card">
     <h2>Try a prompt <span class="mut">— end-to-end, uses failover</span></h2>
     <textarea id="prompt" placeholder="Write a haiku about the sea"></textarea>
     <label>Model (optional)</label>
@@ -115,7 +127,7 @@ function toast(msg, isErr) {
   t.style.borderColor = isErr ? "var(--err)" : "var(--ok)";
   t.style.display = "block"; setTimeout(() => (t.style.display = "none"), 3500);
 }
-function saveKey() { localStorage.setItem("gem_api_key", keyInput.value.trim()); loadAccounts(); }
+function saveKey() { localStorage.setItem("gem_api_key", keyInput.value.trim()); loadAccounts(); loadSettings(); }
 
 async function api(path, method, body) {
   const res = await fetch(path, {
@@ -129,6 +141,25 @@ async function api(path, method, body) {
 }
 
 function statusClass(s) { return ({ ok:"s-ok", error:"s-error", untested:"s-untested" })[s] || "s-other"; }
+
+async function loadSettings() {
+  try {
+    const s = await api("/api/settings");
+    $("defaultModel").innerHTML = s.available_models
+      .map(m => `<option value="${m}" ${m === s.default_model ? "selected" : ""}>${m}</option>`).join("");
+    $("modelHint").textContent = `Requests with no model use: ${s.default_model}`;
+    $("model").placeholder = `leave blank for default (${s.default_model})`;
+  } catch (e) { /* no/invalid key yet — leave the placeholder option */ }
+}
+
+async function saveSettings() {
+  try {
+    const s = await api("/api/settings", "PUT", { default_model: $("defaultModel").value });
+    toast("Default model saved: " + s.default_model);
+    $("modelHint").textContent = `Requests with no model use: ${s.default_model}`;
+    $("model").placeholder = `leave blank for default (${s.default_model})`;
+  } catch (e) { toast(e.message, true); }
+}
 
 async function loadAccounts() {
   try {
@@ -148,6 +179,7 @@ function rowHtml(a) {
     <td><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="toggle('${a.id}', this.checked)"></td>
     <td class="actions">
       <button onclick="testOne('${a.id}')">Test</button>
+      <button onclick="rename('${a.id}','${a.label.replace(/'/g, "\\'")}')">Rename</button>
       <button onclick="reprio('${a.id}')">Priority</button>
       <button class="danger" onclick="del('${a.id}','${a.label}')">Delete</button>
     </td></tr>`;
@@ -183,6 +215,14 @@ async function toggle(id, enabled) {
   catch (e) { toast(e.message, true); }
 }
 
+async function rename(id, current) {
+  const label = prompt("New label:", current);
+  if (label === null) return;
+  if (!label.trim()) return toast("Label can't be empty", true);
+  try { await api(`/api/accounts/${id}`, "PATCH", { label: label.trim() }); toast("Renamed"); loadAccounts(); }
+  catch (e) { toast(e.message, true); }
+}
+
 async function reprio(id) {
   const v = prompt("New priority number (lower = tried first):");
   if (v === null) return;
@@ -211,7 +251,7 @@ async function runPrompt() {
 
 function show(id, txt) { const el = $(id); el.style.display = "block"; el.textContent = txt; }
 
-if (keyInput.value) loadAccounts();
+if (keyInput.value) { loadAccounts(); loadSettings(); }
 </script>
 </body>
 </html>

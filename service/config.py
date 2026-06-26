@@ -37,6 +37,10 @@ class Config:
         self.accounts_path = Path(
             os.getenv("ACCOUNTS_PATH", str(data_dir / "accounts.json"))
         ).resolve()
+        # Runtime-tunable settings (e.g. default model) edited via the admin UI.
+        self.settings_path = Path(
+            os.getenv("SETTINGS_PATH", str(data_dir / "settings.json"))
+        ).resolve()
         self.proxy = os.getenv("GEMINI_PROXY") or None
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "300"))
         # Transient buffer for streamed media (mode="stream").
