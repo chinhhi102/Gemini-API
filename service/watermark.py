@@ -1,19 +1,27 @@
-"""Removal of Gemini's visible corner watermark via reverse alpha blending.
+"""Removal of Gemini's visible corner watermark via exact reverse alpha blending.
 
-Gemini composites a white logo into the bottom-right corner of generated images:
+Recent Gemini image models (Nano Banana / Nano Banana Pro = Gemini 3 Pro Image)
+stamp a small, semi-transparent four-point *gradient sparkle* into the
+bottom-right corner. It is composited over the generated pixels:
 
     watermarked = alpha * logo + (1 - alpha) * original
 
-With the per-pixel ``alpha`` map captured in ``assets/bg_{size}.png`` we invert
-that exactly (lossless apart from 8-bit quantisation):
+where both the per-pixel ``alpha`` and the sparkle's own gradient colour are
+fixed. ``assets/sparkle.npz`` holds those two maps — ``alpha`` (H,W) and the
+premultiplied colour ``P = alpha * logo`` (H,W,3) — solved from flat-colour
+calibration captures. Removal inverts the blend exactly (lossless apart from
+8-bit quantisation), recovering the true pixels underneath — no smudge, even
+across texture and hard edges:
 
-    original = (watermarked - alpha * logo) / (1 - alpha)
+    original = (watermarked - P) / (1 - alpha)
+
+The sparkle is a FIXED 96x96 bitmap at a FIXED 192px margin from the bottom-right
+corner, constant across every Gemini output size observed (2048px–3168px). It
+does NOT scale with the image, so a single map positioned by a constant offset
+serves all sizes.
 
 This strips only the *visible* logo. It does NOT touch SynthID, the invisible
 watermark Gemini embeds during generation.
-
-Ported from https://github.com/VimalMollyn/Gemini-Watermark-Remover-Python
-(vectorised here so the whole region is recovered in one numpy operation).
 """
 
 from io import BytesIO
@@ -24,41 +32,30 @@ from PIL import Image
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
-ALPHA_THRESHOLD = 0.002  # below this the logo is invisible — leave the pixel be
-MAX_ALPHA = 0.99  # cap so 1 - alpha never approaches zero
-LOGO_VALUE = 255.0  # the watermark logo is white
+LOGO_SIZE = 96   # the sparkle bitmap is a fixed 96x96
+LOGO_MARGIN = 192  # fixed gap from the right and bottom edges
 
-_alpha_cache: dict[int, np.ndarray] = {}
-
-
-def _alpha_map(logo_size: int) -> np.ndarray:
-    """Per-pixel alpha in [0, 1] for the given logo size, cached after first load."""
-
-    cached = _alpha_cache.get(logo_size)
-    if cached is not None:
-        return cached
-
-    bg_path = ASSETS_DIR / f"bg_{logo_size}.png"
-    if not bg_path.exists():
-        raise FileNotFoundError(f"Alpha map not found: {bg_path}")
-
-    with Image.open(bg_path) as bg:
-        channels = np.asarray(bg.convert("RGB"), dtype=np.float32)
-
-    alpha = np.max(channels, axis=2) / 255.0
-    alpha[alpha < ALPHA_THRESHOLD] = 0.0  # noise floor → identity (1 - 0 = 1)
-    np.minimum(alpha, MAX_ALPHA, out=alpha)
-
-    _alpha_cache[logo_size] = alpha
-    return alpha
+_maps: tuple[np.ndarray, np.ndarray] | None = None  # (P, one_minus_alpha)
 
 
-def _logo_config(width: int, height: int) -> tuple[int, int]:
-    """Return (logo_size, margin) for the image dimensions, per Gemini's rules."""
+def _sparkle_maps() -> tuple[np.ndarray, np.ndarray]:
+    """Load and cache (premultiplied colour P, 1 - alpha) for the sparkle."""
 
-    if width > 1024 and height > 1024:
-        return 96, 64
-    return 48, 32
+    global _maps
+    if _maps is not None:
+        return _maps
+
+    path = ASSETS_DIR / "sparkle.npz"
+    if not path.exists():
+        raise FileNotFoundError(f"Sparkle map not found: {path}")
+
+    with np.load(path) as data:
+        premultiplied = data["P"].astype(np.float32)
+        # Cap alpha below 1 so the (1 - alpha) divisor never approaches zero.
+        alpha = np.minimum(data["alpha"].astype(np.float32), 0.995)
+
+    _maps = (premultiplied, (1.0 - alpha)[:, :, None])  # broadcast over RGB
+    return _maps
 
 
 def remove_watermark(image: Image.Image) -> Image.Image:
@@ -66,19 +63,18 @@ def remove_watermark(image: Image.Image) -> Image.Image:
 
     rgb = image.convert("RGB")
     width, height = rgb.size
-    logo_size, margin = _logo_config(width, height)
 
-    x = width - margin - logo_size
-    y = height - margin - logo_size
+    x = width - LOGO_MARGIN - LOGO_SIZE
+    y = height - LOGO_MARGIN - LOGO_SIZE
     if x < 0 or y < 0:
-        return rgb  # too small to carry a watermark
+        return rgb  # too small to carry the watermark at this offset
 
-    alpha = _alpha_map(logo_size)[:, :, None]  # (size, size, 1) broadcasts over RGB
+    premultiplied, one_minus_alpha = _sparkle_maps()
     pixels = np.asarray(rgb, dtype=np.float32)
-    region = pixels[y : y + logo_size, x : x + logo_size, :]
+    region = pixels[y : y + LOGO_SIZE, x : x + LOGO_SIZE, :]
 
-    recovered = (region - alpha * LOGO_VALUE) / (1.0 - alpha)
-    pixels[y : y + logo_size, x : x + logo_size, :] = np.clip(recovered, 0, 255)
+    recovered = (region - premultiplied) / one_minus_alpha
+    pixels[y : y + LOGO_SIZE, x : x + LOGO_SIZE, :] = np.clip(recovered, 0, 255)
 
     return Image.fromarray(np.rint(pixels).astype(np.uint8))  # (H, W, 3) → RGB
 
