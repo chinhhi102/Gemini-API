@@ -15,10 +15,11 @@ across texture and hard edges:
 
     original = (watermarked - P) / (1 - alpha)
 
-The sparkle is a FIXED 96x96 bitmap at a FIXED 192px margin from the bottom-right
-corner, constant across every Gemini output size observed (2048px–3168px). It
-does NOT scale with the image, so a single map positioned by a constant offset
-serves all sizes.
+The sparkle is a FIXED 96x96 bitmap at a FIXED 64px margin from the bottom-right
+corner. It does NOT scale with the image, so a single map positioned by a
+constant offset serves all sizes. (Gemini moved it in from a 192px margin and
+restyled it in Oct 2026; the map was recalibrated then — repeat the flat-colour
+calibration if removal starts leaving a ghost again.)
 
 This strips only the *visible* logo. It does NOT touch SynthID, the invisible
 watermark Gemini embeds during generation.
@@ -33,7 +34,7 @@ from PIL import Image
 ASSETS_DIR = Path(__file__).parent / "assets"
 
 LOGO_SIZE = 96   # the sparkle bitmap is a fixed 96x96
-LOGO_MARGIN = 192  # fixed gap from the right and bottom edges
+LOGO_MARGIN = 64  # fixed gap from the right and bottom edges
 
 _maps: tuple[np.ndarray, np.ndarray] | None = None  # (P, one_minus_alpha)
 
