@@ -34,6 +34,7 @@
   .pill { padding:2px 8px; border-radius:20px; font-size:11px; border:1px solid var(--line); }
   .s-ok { color:var(--ok); border-color:var(--ok); }
   .s-error { color:var(--err); border-color:var(--err); }
+  .s-limited { color:#d29922; border-color:#d29922; }
   .s-untested,.s-other { color:var(--mut); }
   .mut { color:var(--mut); }
   .actions button { padding:4px 9px; font-size:12px; margin-right:4px; }
@@ -140,7 +141,7 @@ async function api(path, method, body) {
   return data;
 }
 
-function statusClass(s) { return ({ ok:"s-ok", error:"s-error", untested:"s-untested" })[s] || "s-other"; }
+function statusClass(s) { return ({ ok:"s-ok", error:"s-error", untested:"s-untested", limited:"s-limited" })[s] || "s-other"; }
 
 async function loadSettings() {
   try {

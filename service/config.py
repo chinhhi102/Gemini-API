@@ -43,6 +43,12 @@ class Config:
         ).resolve()
         self.proxy = os.getenv("GEMINI_PROXY") or None
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "300"))
+        # Quota locks: an account that hits a model's limit is skipped for that
+        # model until the reset time Gemini states. QUOTA_TZ is the zone those
+        # wall-clock times are read in; QUOTA_LOCK_SECONDS applies when the
+        # message gives no reset time.
+        self.quota_tz = os.getenv("QUOTA_TZ", "UTC")
+        self.quota_lock_seconds = float(os.getenv("QUOTA_LOCK_SECONDS", "3600"))
         # Transient buffer for streamed media (mode="stream").
         self.media_cache_dir = Path(
             os.getenv("MEDIA_CACHE_DIR", str(data_dir / "cache"))

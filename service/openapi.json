@@ -773,7 +773,7 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "description": "untested | ok | error"
+            "description": "untested | ok | error | limited"
           },
           "status_detail": {
             "type": "string",
@@ -796,6 +796,15 @@
             "title": "Secure 1Psidts",
             "description": "Masked \u2014 last 4 chars only",
             "default": ""
+          },
+          "quota_locks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/QuotaLockOut"
+            },
+            "type": "object",
+            "title": "Quota Locks",
+            "description": "Per-model quota locks; the account is skipped for a model until its lock lifts",
+            "default": {}
           }
         },
         "type": "object",
@@ -1077,6 +1086,18 @@
             "title": "Error",
             "description": "Set when status=failed"
           },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset At",
+            "description": "Set when the job failed because every account hit its quota limit: ISO-8601 UTC time the earliest limit resets (retry after it)."
+          },
           "created_at": {
             "type": "string",
             "title": "Created At",
@@ -1252,6 +1273,26 @@
           "kind"
         ],
         "title": "MediaItem"
+      },
+      "QuotaLockOut": {
+        "properties": {
+          "until": {
+            "type": "string",
+            "title": "Until",
+            "description": "ISO-8601 UTC time the lock lifts"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Gemini's quota-limit message",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "until"
+        ],
+        "title": "QuotaLockOut"
       },
       "SettingsIn": {
         "properties": {

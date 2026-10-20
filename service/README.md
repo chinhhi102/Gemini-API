@@ -169,6 +169,31 @@ curl -s localhost:8000/jobs/$ID -H 'x-api-key: KEY' | jq '{status, result_status
 # -> { "status": "failed", "result_status": "failed" }   (result still populated)
 ```
 
+## Quota limits (account locking)
+
+When an account exhausts a model's quota, Gemini replies with a text refusal
+(e.g. *"I can create more images as soon as your limit resets"*) instead of
+media. The service recognises that reply, **locks the account for that model**
+until the reset time Gemini states (or `QUOTA_LOCK_SECONDS` when it states
+none) and fails over to the next account. While locked, the account is skipped
+for that model without any request reaching Gemini; the lock lifts on its own at
+the reset time and survives restarts. The admin UI shows such accounts as
+`limited` (hover for the reset time); `GET /api/accounts` lists `quota_locks`.
+
+When **every** account is limited (or otherwise failing) the request ends with
+the earliest reset time:
+
+```jsonc
+// POST /generate -> 429, header Retry-After: <seconds>
+{ "detail": { "message": "Quota limit reached",
+              "reset_at": "2026-10-21T14:15:00+00:00", "attempts": [...] } }
+
+// GET /jobs/{id}
+{ "status": "failed",
+  "error": "Quota limit reached, resets at 2026-10-21T14:15:00+00:00",
+  "reset_at": "2026-10-21T14:15:00+00:00", ... }
+```
+
 ## Media delivery
 
 `media` in the request selects how bytes come back:
@@ -282,6 +307,8 @@ curl -X POST localhost:8000/generate \
 | `JOB_TTL`               | no       | Seconds to keep finished jobs (default 86400).         |
 | `JOB_CALLBACK_TIMEOUT`  | no       | Webhook POST timeout in seconds (default 15).          |
 | `JOB_CALLBACK_RETRIES`  | no       | Webhook delivery attempts (default 3).                 |
+| `QUOTA_TZ`              | no       | Zone Gemini's "resets at 2:15 PM" times are read in (default `UTC`).|
+| `QUOTA_LOCK_SECONDS`    | no       | Quota-lock length when Gemini gives no reset time (default 3600).|
 
 ## Notes & limits
 

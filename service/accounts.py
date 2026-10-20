@@ -9,12 +9,15 @@ import asyncio
 import json
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import AuthError, GeminiError, UsageLimitExceeded
+
+from .quota import is_quota_limited, lock_until, resolve_tz
 
 
 def _now() -> str:
@@ -35,6 +38,30 @@ class NoHealthyAccount(Exception):
     def __init__(self, attempts: list[dict]) -> None:
         self.attempts = attempts
         super().__init__("All accounts failed")
+
+
+class QuotaLimited(NoHealthyAccount):
+    """Raised when no account could serve because each is quota-limited (or broken).
+
+    ``reset_at`` (ISO-8601 UTC) is the earliest moment any account's lock lifts.
+    """
+
+    def __init__(self, reset_at: str, attempts: list[dict]) -> None:
+        super().__init__(attempts)
+        self.reset_at = reset_at
+        self.args = (f"Quota limit reached, resets at {reset_at}",)
+
+
+@dataclass(frozen=True)
+class ManagerOptions:
+    proxy: str | None = None
+    timeout: float = 300.0
+    quota_tz: str = "UTC"
+    quota_lock_seconds: float = 3600.0
+
+
+def _model_key(model) -> str:
+    return model if isinstance(model, str) else model.model_name
 
 
 class AccountStore:
@@ -95,6 +122,36 @@ class AccountStore:
             account.update(status=status, status_detail=detail, updated_at=_now())
             self._save()
 
+    def quota_lock(self, account: dict, model: str, now: datetime) -> str | None:
+        """ISO time the account's lock for ``model`` lifts, or None if unlocked."""
+
+        entry = account.get("quota_locks", {}).get(model)
+        if entry and datetime.fromisoformat(entry["until"]) > now:
+            return entry["until"]
+        return None
+
+    def lock_quota(self, account_id: str, model: str, until: datetime, detail: str) -> str:
+        """Lock ``model`` on the account until ``until``; prunes expired locks."""
+
+        until_iso = until.isoformat(timespec="seconds")
+        account = self._accounts.get(account_id)
+        if not account:  # deleted mid-request; nothing to lock
+            return until_iso
+        now = datetime.now(timezone.utc)
+        locks = {
+            m: e for m, e in account.get("quota_locks", {}).items()
+            if datetime.fromisoformat(e["until"]) > now
+        }
+        locks[model] = {"until": until_iso, "detail": detail[:300]}
+        account.update(
+            quota_locks=locks,
+            status="limited",
+            status_detail=f"{model} quota limit, resets at {until_iso}",
+            updated_at=_now(),
+        )
+        self._save()
+        return until_iso
+
     def delete(self, account_id: str) -> bool:
         if self._accounts.pop(account_id, None) is None:
             return False
@@ -115,16 +172,28 @@ class AccountStore:
             "updated_at": account["updated_at"],
             "secure_1psid": _mask(account["secure_1psid"]),
             "secure_1psidts": _mask(account["secure_1psidts"]),
+            "quota_locks": account.get("quota_locks", {}),
         }
+
+
+def _exhausted(attempts: list[dict]) -> NoHealthyAccount:
+    """Pick the terminal error: quota-limited (with earliest reset) or plain failure."""
+
+    resets = [a["reset_at"] for a in attempts if a.get("reset_at")]
+    if resets:
+        return QuotaLimited(min(resets, key=datetime.fromisoformat), attempts)
+    return NoHealthyAccount(attempts)
 
 
 class AccountManager:
     """Owns live GeminiClient instances and implements failover."""
 
-    def __init__(self, store: AccountStore, proxy: str | None, timeout: float) -> None:
+    def __init__(self, store: AccountStore, options: ManagerOptions) -> None:
         self.store = store
-        self.proxy = proxy
-        self.timeout = timeout
+        self.proxy = options.proxy
+        self.timeout = options.timeout
+        self.quota_tz = resolve_tz(options.quota_tz)
+        self.quota_lock_seconds = options.quota_lock_seconds
         self._clients: dict[str, GeminiClient] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._rotation = 0  # round-robin cursor across enabled accounts
@@ -172,33 +241,66 @@ class AccountManager:
         evenly (no single account absorbs every request and burns its usage
         window while the others idle). On error the remaining accounts are still
         tried, so a single call only fails when every enabled account fails.
+
+        Accounts quota-locked for ``model`` are skipped without contacting
+        Gemini. A reply that turns out to be a quota-limit refusal locks the
+        account until its reset time and fails over like any other error.
         """
 
         attempts: list[dict] = []
+        ordered = self._rotation_order()
+        model_key = _model_key(model)
+        now = datetime.now(timezone.utc)
+        for account in ordered:
+            locked_until = self.store.quota_lock(account, model_key, now)
+            if locked_until:
+                attempts.append({"label": account["label"], "error": "quota limit (locked)",
+                                 "reset_at": locked_until})
+                continue
+            output = await self._try_account(account, prompt, model, attempts)
+            if output is not None:
+                return output, account
+        raise _exhausted(attempts)
+
+    def _rotation_order(self) -> list[dict]:
         enabled = [a for a in self.store.list() if a["enabled"]]
         if not enabled:
-            raise NoHealthyAccount(attempts)
-
+            return []
         start = self._rotation % len(enabled)
         self._rotation = (start + 1) % len(enabled)
-        ordered = enabled[start:] + enabled[:start]
+        return enabled[start:] + enabled[:start]
 
-        for account in ordered:
-            try:
-                client = await self._get_client(account)
-                # Cap the generation itself, not just init: a hung Gemini response
-                # would otherwise pin a job worker forever (TimeoutError is caught
-                # below, so it just fails over to the next account).
-                output = await asyncio.wait_for(
-                    client.generate_content(prompt, model=model), timeout=self.timeout
-                )
-                self.store.set_status(account["id"], "ok")
-                return output, account
-            except (AuthError, UsageLimitExceeded, GeminiError, Exception) as exc:
-                self.store.set_status(account["id"], "error", str(exc))
-                await self.invalidate(account["id"])
-                attempts.append({"label": account["label"], "error": str(exc)})
-        raise NoHealthyAccount(attempts)
+    async def _try_account(self, account: dict, prompt: str, model, attempts: list[dict]):
+        """One generation attempt; returns the output, or None after recording why."""
+
+        try:
+            client = await self._get_client(account)
+            # Cap the generation itself, not just init: a hung Gemini response
+            # would otherwise pin a job worker forever (TimeoutError is caught
+            # below, so it just fails over to the next account).
+            output = await asyncio.wait_for(
+                client.generate_content(prompt, model=model), timeout=self.timeout
+            )
+        except UsageLimitExceeded as exc:
+            # Quota, not a broken session: keep the live client.
+            self._lock_quota(account, _model_key(model), str(exc), attempts)
+            return None
+        except (AuthError, GeminiError, Exception) as exc:
+            self.store.set_status(account["id"], "error", str(exc))
+            await self.invalidate(account["id"])
+            attempts.append({"label": account["label"], "error": str(exc)})
+            return None
+        if is_quota_limited(output):
+            self._lock_quota(account, _model_key(model), output.text, attempts)
+            return None
+        self.store.set_status(account["id"], "ok")
+        return output
+
+    def _lock_quota(self, account: dict, model: str, message: str, attempts: list[dict]) -> None:
+        now = datetime.now(timezone.utc)
+        until = lock_until(message, now, self.quota_tz, self.quota_lock_seconds)
+        until_iso = self.store.lock_quota(account["id"], model, until, message)
+        attempts.append({"label": account["label"], "error": message, "reset_at": until_iso})
 
     async def test(self, psid: str, psidts: str) -> tuple[bool, str]:
         """Validate cookies by initialising a throwaway client. No quota spent."""
