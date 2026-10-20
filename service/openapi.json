@@ -797,14 +797,16 @@
             "description": "Masked \u2014 last 4 chars only",
             "default": ""
           },
-          "quota_locks": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/QuotaLockOut"
-            },
-            "type": "object",
-            "title": "Quota Locks",
-            "description": "Per-model quota locks; the account is skipped for a model until its lock lifts",
-            "default": {}
+          "quota_lock": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuotaLockOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set while quota-locked: the account is skipped (no requests sent) until it lifts"
           }
         },
         "type": "object",
@@ -1096,7 +1098,7 @@
               }
             ],
             "title": "Reset At",
-            "description": "Set when the job failed because every account hit its quota limit: ISO-8601 UTC time the earliest limit resets (retry after it)."
+            "description": "Set when the job failed because the accounts are quota-locked: ISO-8601 UTC time the earliest lock lifts (retry after it)."
           },
           "created_at": {
             "type": "string",

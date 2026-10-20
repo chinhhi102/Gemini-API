@@ -118,8 +118,8 @@ class JobOut(BaseModel):
     reset_at: str | None = Field(
         None,
         description=(
-            "Set when the job failed because every account hit its quota limit: "
-            "ISO-8601 UTC time the earliest limit resets (retry after it)."
+            "Set when the job failed because the accounts are quota-locked: "
+            "ISO-8601 UTC time the earliest lock lifts (retry after it)."
         ),
     )
     created_at: str = ""
@@ -145,9 +145,9 @@ class AccountOut(BaseModel):
     updated_at: str = ""
     secure_1psid: str = Field("", description="Masked — last 4 chars only")
     secure_1psidts: str = Field("", description="Masked — last 4 chars only")
-    quota_locks: dict[str, QuotaLockOut] = Field(
-        default={},
-        description="Per-model quota locks; the account is skipped for a model until its lock lifts",
+    quota_lock: QuotaLockOut | None = Field(
+        None,
+        description="Set while quota-locked: the account is skipped (no requests sent) until it lifts",
     )
 
 
@@ -211,7 +211,6 @@ async def lifespan(app: FastAPI):
         ManagerOptions(
             proxy=config.proxy,
             timeout=config.request_timeout,
-            quota_tz=config.quota_tz,
             quota_lock_seconds=config.quota_lock_seconds,
         ),
     )

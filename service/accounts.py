@@ -10,14 +10,14 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import AuthError, GeminiError, UsageLimitExceeded
 
-from .quota import is_quota_limited, lock_until, resolve_tz
+from .quota import is_quota_limited
 
 
 def _now() -> str:
@@ -41,7 +41,7 @@ class NoHealthyAccount(Exception):
 
 
 class QuotaLimited(NoHealthyAccount):
-    """Raised when no account could serve because each is quota-limited (or broken).
+    """Raised when no account could serve and at least one is quota-locked.
 
     ``reset_at`` (ISO-8601 UTC) is the earliest moment any account's lock lifts.
     """
@@ -56,12 +56,7 @@ class QuotaLimited(NoHealthyAccount):
 class ManagerOptions:
     proxy: str | None = None
     timeout: float = 300.0
-    quota_tz: str = "UTC"
     quota_lock_seconds: float = 3600.0
-
-
-def _model_key(model) -> str:
-    return model if isinstance(model, str) else model.model_name
 
 
 class AccountStore:
@@ -122,31 +117,26 @@ class AccountStore:
             account.update(status=status, status_detail=detail, updated_at=_now())
             self._save()
 
-    def quota_lock(self, account: dict, model: str, now: datetime) -> str | None:
-        """ISO time the account's lock for ``model`` lifts, or None if unlocked."""
+    @staticmethod
+    def quota_lock(account: dict, now: datetime) -> str | None:
+        """ISO time the account's quota lock lifts, or None if unlocked."""
 
-        entry = account.get("quota_locks", {}).get(model)
-        if entry and datetime.fromisoformat(entry["until"]) > now:
-            return entry["until"]
+        lock = account.get("quota_lock")
+        if lock and datetime.fromisoformat(lock["until"]) > now:
+            return lock["until"]
         return None
 
-    def lock_quota(self, account_id: str, model: str, until: datetime, detail: str) -> str:
-        """Lock ``model`` on the account until ``until``; prunes expired locks."""
+    def lock_quota(self, account_id: str, until: datetime, detail: str) -> str:
+        """Lock the whole account until ``until`` (no requests sent meanwhile)."""
 
         until_iso = until.isoformat(timespec="seconds")
         account = self._accounts.get(account_id)
         if not account:  # deleted mid-request; nothing to lock
             return until_iso
-        now = datetime.now(timezone.utc)
-        locks = {
-            m: e for m, e in account.get("quota_locks", {}).items()
-            if datetime.fromisoformat(e["until"]) > now
-        }
-        locks[model] = {"until": until_iso, "detail": detail[:300]}
         account.update(
-            quota_locks=locks,
+            quota_lock={"until": until_iso, "detail": detail[:300]},
             status="limited",
-            status_detail=f"{model} quota limit, resets at {until_iso}",
+            status_detail=f"Quota limit, locked until {until_iso}",
             updated_at=_now(),
         )
         self._save()
@@ -172,7 +162,7 @@ class AccountStore:
             "updated_at": account["updated_at"],
             "secure_1psid": _mask(account["secure_1psid"]),
             "secure_1psidts": _mask(account["secure_1psidts"]),
-            "quota_locks": account.get("quota_locks", {}),
+            "quota_lock": account.get("quota_lock"),
         }
 
 
@@ -192,7 +182,6 @@ class AccountManager:
         self.store = store
         self.proxy = options.proxy
         self.timeout = options.timeout
-        self.quota_tz = resolve_tz(options.quota_tz)
         self.quota_lock_seconds = options.quota_lock_seconds
         self._clients: dict[str, GeminiClient] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -242,17 +231,16 @@ class AccountManager:
         window while the others idle). On error the remaining accounts are still
         tried, so a single call only fails when every enabled account fails.
 
-        Accounts quota-locked for ``model`` are skipped without contacting
-        Gemini. A reply that turns out to be a quota-limit refusal locks the
-        account until its reset time and fails over like any other error.
+        Quota-locked accounts are skipped without contacting Gemini. A reply
+        that turns out to be a quota-limit refusal locks the whole account for
+        ``quota_lock_seconds`` and fails over like any other error.
         """
 
         attempts: list[dict] = []
         ordered = self._rotation_order()
-        model_key = _model_key(model)
         now = datetime.now(timezone.utc)
         for account in ordered:
-            locked_until = self.store.quota_lock(account, model_key, now)
+            locked_until = self.store.quota_lock(account, now)
             if locked_until:
                 attempts.append({"label": account["label"], "error": "quota limit (locked)",
                                  "reset_at": locked_until})
@@ -283,7 +271,7 @@ class AccountManager:
             )
         except UsageLimitExceeded as exc:
             # Quota, not a broken session: keep the live client.
-            self._lock_quota(account, _model_key(model), str(exc), attempts)
+            self._lock_quota(account, str(exc), attempts)
             return None
         except (AuthError, GeminiError, Exception) as exc:
             self.store.set_status(account["id"], "error", str(exc))
@@ -291,15 +279,14 @@ class AccountManager:
             attempts.append({"label": account["label"], "error": str(exc)})
             return None
         if is_quota_limited(output):
-            self._lock_quota(account, _model_key(model), output.text, attempts)
+            self._lock_quota(account, output.text, attempts)
             return None
         self.store.set_status(account["id"], "ok")
         return output
 
-    def _lock_quota(self, account: dict, model: str, message: str, attempts: list[dict]) -> None:
-        now = datetime.now(timezone.utc)
-        until = lock_until(message, now, self.quota_tz, self.quota_lock_seconds)
-        until_iso = self.store.lock_quota(account["id"], model, until, message)
+    def _lock_quota(self, account: dict, message: str, attempts: list[dict]) -> None:
+        until = datetime.now(timezone.utc) + timedelta(seconds=self.quota_lock_seconds)
+        until_iso = self.store.lock_quota(account["id"], until, message)
         attempts.append({"label": account["label"], "error": message, "reset_at": until_iso})
 
     async def test(self, psid: str, psidts: str) -> tuple[bool, str]:
