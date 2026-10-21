@@ -212,6 +212,7 @@ async def lifespan(app: FastAPI):
             proxy=config.proxy,
             timeout=config.request_timeout,
             quota_lock_seconds=config.quota_lock_seconds,
+            chat_session_seconds=config.chat_session_seconds,
         ),
     )
     app.state.cache = MediaCache(config.media_cache_dir, config.media_cache_ttl)

@@ -42,8 +42,16 @@ class _FakeClient:
         self.outputs = outputs
         self.calls = 0
 
-    async def generate_content(self, prompt, model=None):
+        self.chats: list = []
+
+    def start_chat(self):
+        chat = SimpleNamespace(geminiclient=self)
+        self.chats.append(chat)
+        return chat
+
+    async def generate_content(self, prompt, model=None, chat=None):
         self.calls += 1
+        self.last_chat = chat
         return self.outputs.pop(0)
 
 
@@ -107,6 +115,35 @@ class TestManagerQuotaLock(unittest.IsolatedAsyncioTestCase):
 
         _, served = await self.manager.generate("draw", "gemini-3-flash")
         self.assertEqual(served["label"], "a")
+
+
+class TestManagerChatSession(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        store = AccountStore(Path(self.tmp.name) / "accounts.json")
+        self.account = store.add("a", "psid-a", "")
+        self.manager = AccountManager(store, ManagerOptions(chat_session_seconds=900))
+        self.client = _FakeClient([_output("ok", images=("img",))] * 3)
+
+        async def fake_get_client(account):
+            return self.client
+
+        self.manager._get_client = fake_get_client
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    async def test_requests_share_one_chat_until_it_ages_out(self):
+        await self.manager.generate("one", "gemini-3-flash")
+        await self.manager.generate("two", "gemini-3-pro")
+        self.assertEqual(len(self.client.chats), 1)
+        self.assertIs(self.client.last_chat, self.client.chats[0])
+
+        chat, started = self.manager._chats[self.account["id"]]
+        self.manager._chats[self.account["id"]] = (chat, started - 901)
+        await self.manager.generate("three", "gemini-3-flash")
+        self.assertEqual(len(self.client.chats), 2)
+        self.assertIs(self.client.last_chat, self.client.chats[1])
 
 
 if __name__ == "__main__":

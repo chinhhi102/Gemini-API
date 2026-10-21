@@ -309,6 +309,7 @@ curl -X POST localhost:8000/generate \
 | `JOB_CALLBACK_TIMEOUT`  | no       | Webhook POST timeout in seconds (default 15).          |
 | `JOB_CALLBACK_RETRIES`  | no       | Webhook delivery attempts (default 3).                 |
 | `QUOTA_LOCK_SECONDS`    | no       | How long a quota-limited account is locked (default 3600).|
+| `CHAT_SESSION_SECONDS`  | no       | How long each account reuses one Gemini chat before starting a new one (default 900). Requests on one account run one at a time. |
 
 ## Notes & limits
 
