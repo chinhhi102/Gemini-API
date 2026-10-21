@@ -19,6 +19,8 @@ class TestQuotaDetection(unittest.TestCase):
     def test_known_limit_messages(self):
         for text in (
             LIMIT,
+            "I can create more images as soon as your limit resets. Check your usage in Settings.",
+            "Check your usage in Settings.",
             "You've reached your limit for creating images. Your limit resets Oct 21 at 2:15 PM.",
             "I can't create more images for you today.",
             "You've hit your image generation limit.",

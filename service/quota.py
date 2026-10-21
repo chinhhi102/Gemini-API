@@ -3,7 +3,7 @@
 When an account exhausts its quota, Gemini does not raise an error: it answers
 with a plain-text refusal and no media, e.g.
 
-    "I can create more images as soon as your limit resets."
+    "I can create more images as soon as your limit resets. Check your usage in Settings."
 
 The service treats such a reply as a quota hit and locks the whole account for
 a fixed period (QUOTA_LOCK_SECONDS), so no further requests are sent to Gemini
@@ -19,6 +19,7 @@ _LIMIT_PATTERNS = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"\blimit\s+resets?\b",
+        r"\bcheck\s+your\s+usage\b",
         r"\breached\s+(?:your|the|my)\s+(?:\w+\s+){0,3}limit\b",
         r"\b(?:can't|can’t|cannot|can not|unable to)\s+(?:create|generate|make)\s+"
         r"(?:any\s+)?more\s+(?:images|pictures|videos)\b",
