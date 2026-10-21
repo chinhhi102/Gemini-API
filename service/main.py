@@ -17,6 +17,7 @@ import base64
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -28,7 +29,7 @@ from gemini_webapi import set_log_level
 from gemini_webapi.constants import Model
 from gemini_webapi.types import ModelOutput
 
-from .accounts import AccountManager, AccountStore, NoHealthyAccount
+from .accounts import AccountManager, AccountStore, ManagerOptions, NoHealthyAccount, QuotaLimited
 from .settings import SettingsStore
 from .config import config
 from .jobs import JobQueue, JobStatus, build_job_store
@@ -114,6 +115,13 @@ class JobOut(BaseModel):
     status: JobStatus = Field(..., description="queued | processing | completed | failed")
     result: GenerateResponse | None = Field(None, description="Set when status=completed")
     error: str | None = Field(None, description="Set when status=failed")
+    reset_at: str | None = Field(
+        None,
+        description=(
+            "Set when the job failed because the accounts are quota-locked: "
+            "ISO-8601 UTC time the earliest lock lifts (retry after it)."
+        ),
+    )
     created_at: str = ""
     updated_at: str = ""
 
@@ -122,16 +130,25 @@ class JobList(BaseModel):
     jobs: list[JobOut] = []
 
 
+class QuotaLockOut(BaseModel):
+    until: str = Field(..., description="ISO-8601 UTC time the lock lifts")
+    detail: str = Field("", description="Gemini's quota-limit message")
+
+
 class AccountOut(BaseModel):
     id: str
     label: str
     enabled: bool
     priority: int
-    status: str = Field(..., description="untested | ok | error")
+    status: str = Field(..., description="untested | ok | error | limited")
     status_detail: str = ""
     updated_at: str = ""
     secure_1psid: str = Field("", description="Masked — last 4 chars only")
     secure_1psidts: str = Field("", description="Masked — last 4 chars only")
+    quota_lock: QuotaLockOut | None = Field(
+        None,
+        description="Set while quota-locked: the account is skipped (no requests sent) until it lifts",
+    )
 
 
 class AccountList(BaseModel):
@@ -189,7 +206,15 @@ async def lifespan(app: FastAPI):
     set_log_level("INFO")
     store = AccountStore(config.accounts_path)
     _seed_from_env(store)
-    app.state.manager = AccountManager(store, config.proxy, config.request_timeout)
+    app.state.manager = AccountManager(
+        store,
+        ManagerOptions(
+            proxy=config.proxy,
+            timeout=config.request_timeout,
+            quota_lock_seconds=config.quota_lock_seconds,
+            chat_session_seconds=config.chat_session_seconds,
+        ),
+    )
     app.state.cache = MediaCache(config.media_cache_dir, config.media_cache_ttl)
     app.state.settings = SettingsStore(config.settings_path)
 
@@ -445,9 +470,23 @@ async def generate(req: GenerateRequest, request: Request) -> GenerateResponse:
             req,
             request.app.state.settings.default_model,
         )
+    except QuotaLimited as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={"message": "Quota limit reached", "reset_at": exc.reset_at,
+                    "attempts": exc.attempts},
+            headers={"Retry-After": _retry_after(exc.reset_at)},
+        )
     except NoHealthyAccount as exc:
         raise HTTPException(status_code=502, detail={"message": "All accounts failed",
                                                      "attempts": exc.attempts})
+
+
+def _retry_after(reset_at: str) -> str:
+    """Seconds until ``reset_at`` (ISO-8601), for the Retry-After header."""
+
+    delta = datetime.fromisoformat(reset_at) - datetime.now(timezone.utc)
+    return str(max(0, int(delta.total_seconds())))
 
 
 # --------------------------------------------------------------------------- #
@@ -459,6 +498,7 @@ def _job_view(job: dict) -> JobOut:
         status=job["status"],
         result=job["result"],
         error=job["error"],
+        reset_at=job.get("reset_at"),
         created_at=job["created_at"],
         updated_at=job["updated_at"],
     )

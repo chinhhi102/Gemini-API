@@ -68,6 +68,7 @@ def _new_job(request: dict, callback_url: str | None) -> dict:
         "callback_url": callback_url,
         "result": None,
         "error": None,
+        "reset_at": None,
         "created_at": ts,
         "updated_at": ts,
     }
@@ -351,7 +352,11 @@ class JobQueue:
         except Exception as exc:  # noqa: BLE001 - surfaced to the client via the job
             logger.warning(f"Job {job_id} failed: {exc}")
             done = await self.store.update(
-                job_id, status=JobStatus.FAILED.value, error=str(exc)
+                job_id,
+                status=JobStatus.FAILED.value,
+                error=str(exc),
+                # Set for quota-limit failures: when the caller may retry.
+                reset_at=getattr(exc, "reset_at", None),
             )
         self._spawn_callback(done)
 
@@ -367,8 +372,8 @@ class JobQueue:
 
         url = job["callback_url"]
         payload = {
-            k: job[k]
-            for k in ("id", "status", "result", "error", "created_at", "updated_at")
+            k: job.get(k)
+            for k in ("id", "status", "result", "error", "reset_at", "created_at", "updated_at")
         }
         delay = 1.0
         async with httpx.AsyncClient(timeout=self.callback_timeout) as client:

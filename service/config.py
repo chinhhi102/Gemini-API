@@ -43,6 +43,12 @@ class Config:
         ).resolve()
         self.proxy = os.getenv("GEMINI_PROXY") or None
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "300"))
+        # Quota locks: an account whose reply is Gemini's quota-limit refusal is
+        # skipped entirely (no requests sent) for this many seconds.
+        self.quota_lock_seconds = float(os.getenv("QUOTA_LOCK_SECONDS", "3600"))
+        # Each account keeps one Gemini chat and sends every request into it,
+        # starting a new chat only after this many seconds.
+        self.chat_session_seconds = float(os.getenv("CHAT_SESSION_SECONDS", "900"))
         # Transient buffer for streamed media (mode="stream").
         self.media_cache_dir = Path(
             os.getenv("MEDIA_CACHE_DIR", str(data_dir / "cache"))
