@@ -8,13 +8,12 @@ enabled accounts in priority order, falling through to the next when one errors.
 import asyncio
 import json
 import os
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from gemini_webapi import ChatSession, GeminiClient
+from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import AuthError, GeminiError, UsageLimitExceeded
 
@@ -58,7 +57,6 @@ class ManagerOptions:
     proxy: str | None = None
     timeout: float = 300.0
     quota_lock_seconds: float = 3600.0
-    chat_session_seconds: float = 900.0
 
 
 class AccountStore:
@@ -185,13 +183,10 @@ class AccountManager:
         self.proxy = options.proxy
         self.timeout = options.timeout
         self.quota_lock_seconds = options.quota_lock_seconds
-        self.chat_session_seconds = options.chat_session_seconds
         self._clients: dict[str, GeminiClient] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # One live Gemini chat per account, reused until it ages out, so the
-        # account does not open a brand-new conversation for every request.
-        self._chats: dict[str, tuple[ChatSession, float]] = {}
-        self._chat_locks: dict[str, asyncio.Lock] = {}
+        # Serialises sends per account: one in-flight Gemini request each.
+        self._send_locks: dict[str, asyncio.Lock] = {}
         self._rotation = 0  # round-robin cursor across enabled accounts
 
     def _lock(self, account_id: str) -> asyncio.Lock:
@@ -226,7 +221,6 @@ class AccountManager:
     async def invalidate(self, account_id: str) -> None:
         """Drop and close the live client (e.g. after a cookie edit or failure)."""
 
-        self._chats.pop(account_id, None)
         client = self._clients.pop(account_id, None)
         if client is not None:
             await client.close()
@@ -288,31 +282,19 @@ class AccountManager:
         return output
 
     async def _send(self, account_id: str, client: GeminiClient, prompt: str, model):
-        """Send the prompt into the account's shared chat session.
+        """Send the prompt in a brand-new Gemini chat, one request per account at a time.
 
-        Requests on one account are serialised: concurrent sends would race on
-        the chat's reply ids and fork the conversation.
+        Every request gets its own chat on purpose: in a shared chat Gemini reads
+        the earlier prompts and redraws their images instead of the new one.
         """
 
-        async with self._chat_locks.setdefault(account_id, asyncio.Lock()):
-            chat = self._chat_for(account_id, client)
+        async with self._send_locks.setdefault(account_id, asyncio.Lock()):
             # Cap the generation itself, not just init: a hung Gemini response
             # would otherwise pin a job worker forever (TimeoutError is caught
             # by the caller, so it just fails over to the next account).
             return await asyncio.wait_for(
-                client.generate_content(prompt, model=model, chat=chat), timeout=self.timeout
+                client.generate_content(prompt, model=model), timeout=self.timeout
             )
-
-    def _chat_for(self, account_id: str, client: GeminiClient) -> ChatSession:
-        """The account's current chat, or a fresh one once it is too old."""
-
-        chat, started = self._chats.get(account_id, (None, 0.0))
-        fresh = time.monotonic() - started < self.chat_session_seconds
-        if chat is not None and fresh and chat.geminiclient is client:
-            return chat
-        chat = client.start_chat()
-        self._chats[account_id] = (chat, time.monotonic())
-        return chat
 
     def _lock_quota(self, account: dict, message: str, attempts: list[dict]) -> None:
         until = datetime.now(timezone.utc) + timedelta(seconds=self.quota_lock_seconds)

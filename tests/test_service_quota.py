@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -42,16 +43,9 @@ class _FakeClient:
         self.outputs = outputs
         self.calls = 0
 
-        self.chats: list = []
 
-    def start_chat(self):
-        chat = SimpleNamespace(geminiclient=self)
-        self.chats.append(chat)
-        return chat
-
-    async def generate_content(self, prompt, model=None, chat=None):
+    async def generate_content(self, prompt, model=None):
         self.calls += 1
-        self.last_chat = chat
         return self.outputs.pop(0)
 
 
@@ -117,34 +111,34 @@ class TestManagerQuotaLock(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(served["label"], "a")
 
 
-class TestManagerChatSession(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        store = AccountStore(Path(self.tmp.name) / "accounts.json")
-        self.account = store.add("a", "psid-a", "")
-        self.manager = AccountManager(store, ManagerOptions(chat_session_seconds=900))
-        self.client = _FakeClient([_output("ok", images=("img",))] * 3)
+class TestManagerSerialisedSends(unittest.IsolatedAsyncioTestCase):
+    async def test_each_request_is_a_new_chat_and_one_runs_at_a_time(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = AccountStore(Path(tmp.name) / "accounts.json")
+        store.add("a", "psid-a", "")
+        manager = AccountManager(store, ManagerOptions())
+        in_flight, peak, chats = 0, 0, []
+
+        class Client:
+            async def generate_content(self, prompt, model=None, chat=None):
+                nonlocal in_flight, peak
+                chats.append(chat)
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                return _output("ok", images=("img",))
+
+        client = Client()
 
         async def fake_get_client(account):
-            return self.client
+            return client
 
-        self.manager._get_client = fake_get_client
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    async def test_requests_share_one_chat_until_it_ages_out(self):
-        await self.manager.generate("one", "gemini-3-flash")
-        await self.manager.generate("two", "gemini-3-pro")
-        self.assertEqual(len(self.client.chats), 1)
-        self.assertIs(self.client.last_chat, self.client.chats[0])
-
-        chat, started = self.manager._chats[self.account["id"]]
-        self.manager._chats[self.account["id"]] = (chat, started - 901)
-        await self.manager.generate("three", "gemini-3-flash")
-        self.assertEqual(len(self.client.chats), 2)
-        self.assertIs(self.client.last_chat, self.client.chats[1])
-
+        manager._get_client = fake_get_client
+        await asyncio.gather(*(manager.generate(f"p{i}", "m") for i in range(3)))
+        self.assertEqual(peak, 1)
+        self.assertEqual(chats, [None, None, None])
 
 
 class TestPublicMetadata(unittest.TestCase):
