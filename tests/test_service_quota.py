@@ -146,5 +146,16 @@ class TestManagerChatSession(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.client.last_chat, self.client.chats[1])
 
 
+
+class TestPublicMetadata(unittest.TestCase):
+    def test_chat_session_metadata_is_reduced_to_ids(self):
+        from service.main import _public_metadata
+
+        chat_state = ["c_1", "r_1", "rc_1", None, None, None, None, None, None, ""]
+        self.assertEqual(_public_metadata(chat_state), ["c_1", "r_1"])
+        self.assertEqual(_public_metadata(["c_1", "r_1"]), ["c_1", "r_1"])
+        self.assertEqual(_public_metadata([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

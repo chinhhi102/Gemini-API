@@ -274,6 +274,16 @@ def _media_entries(output: ModelOutput) -> list[tuple]:
     return entries
 
 
+def _public_metadata(metadata: list) -> list[str]:
+    """``[chat_id, reply_id]`` of the reply.
+
+    Replies sent through a chat session carry the session's full internal
+    state (10 slots, mostly None), so keep only the two ids callers rely on.
+    """
+
+    return [str(m) for m in (metadata or [])[:2] if m]
+
+
 def _has_modality(res_type: str, output: ModelOutput) -> bool:
     """Whether the generation output carries the requested response modality."""
 
@@ -368,7 +378,7 @@ async def perform_generation(
         text=output.text,
         thoughts=output.thoughts,
         media=media,
-        metadata=output.metadata,
+        metadata=_public_metadata(output.metadata),
     )
 
 
